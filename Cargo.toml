@@ -1,10 +1,10 @@
 [package]
-name = "laundry5"
+name = "backconnectsocks5"
 version = "0.1.0"
 description = "Shuffles your socks - rotating proxy frontend server"
-authors = ["kpcyrd <git@rxv.cc>"]
+authors = ["superdevel7 <git@rxv.cc>"]
 license = "GPL-3.0"
-repository = "https://github.com/kpcyrd/laundry5"
+repository = "https://github.com/superdevel7/backconnectsocks5"
 categories = ["command-line-utilities"]
 readme = "README.md"
 edition = "2018"

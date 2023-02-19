@@ -22,9 +22,9 @@ async fn main() -> Result<()> {
     let logging = match (args.quiet, args.verbose) {
         (true, _) => "warn",
         (false, 0) => "info",
-        (false, 1) => "info,laundry5=debug",
+        (false, 1) => "info,backconnectsocks5=debug",
         (false, 2) => "debug",
-        (false, _) => "debug,laundry5=trace",
+        (false, _) => "debug,backconnectsocks5=trace",
     };
     env_logger::init_from_env(Env::default().default_filter_or(logging));
 
