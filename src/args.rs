@@ -16,7 +16,4 @@ pub struct Args {
     /// The address to bind to
     #[structopt(short = "B", long, default_value = "127.0.0.1:1080")]
     pub bind: SocketAddr,
-    /// The path to the proxy list to use
-    #[structopt(short = "L", long)]
-    pub proxy_list: PathBuf,
 }
