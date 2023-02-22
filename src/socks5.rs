@@ -193,3 +193,24 @@ pub async fn serve(mut socket: TcpStream, proxies: Arc<Vec<SocketAddr>>) -> Resu
 
     Ok(())
 }
+
+pub async fn serve_one(mut socket: TcpStream, proxy: SocketAddr) -> Result<()> {
+    let mut buf = [0u8; 255];
+    let (addr, port) = recv_handshake(&mut socket, &mut buf)
+        .await
+        .context("Failed to complete handshake with client")?;
+
+    debug!("Received connection request for {}:{}", addr, port);
+
+    let mut proxy = connect(&proxy, &addr, port)
+        .await
+        .context("Failed to complete handshake with proxy")?;
+
+    tokio::io::copy_bidirectional(&mut socket, &mut proxy)
+        .await
+        .context("Failed to relay data")?;
+
+    debug!("Connection finished");
+
+    Ok(())
+}
