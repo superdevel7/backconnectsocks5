@@ -51,7 +51,7 @@ pub struct ErrMessage {
 
 lazy_static! {
     static ref CONN: Mutex<PooledConn> = {
-        let url = "mysql://root:Test!234@127.0.0.1:3306/backconnect";
+        let url = "mysql://root:password@127.0.0.1:3306/backconnect";
         let pool = Pool::new(url).unwrap();
         let m = pool.get_conn().unwrap();
         Mutex::new(m)
@@ -140,7 +140,7 @@ pub async fn handle_request(body: Body) -> Result<impl warp::Reply, Infallible> 
 
         {
             let mut rng = rand::thread_rng();
-            p = rng.gen_range(30000..60000);
+            p = rng.gen_range(8010..8100);
         }
 
         // // tokio::spawn(async move {
