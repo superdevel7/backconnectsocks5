@@ -76,8 +76,6 @@ pub async fn recv_handshake<'a>(
             .await
             .context("Failed to read handshake - username length")?;
 
-        println!("version: {}", buf[0]);
-
         let username_size = buf[1] as usize;
 
         let mut buf = [0u8; 255];

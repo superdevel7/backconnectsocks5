@@ -18,7 +18,7 @@ use env_logger::Env;
 use mysql::*;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 // use std::path::PathBuf;
 // use std::sync::Arc;
 use structopt::StructOpt;
@@ -113,6 +113,24 @@ pub async fn run_server(
                         },
                     };
                     debug!("Got new client connection from {}", src);
+
+                    if !allow_ip.is_empty() {
+
+                        if src.is_ipv4() {
+                            let ip_str: String = match src.ip() {
+                                IpAddr::V4(ip) => format!("{}.{}.{}.{}", ip.octets()[0], ip.octets()[1], ip.octets()[2], ip.octets()[3]),
+                                IpAddr::V6(_ip) => "".to_string(),
+                            };
+                            if ip_str.ne(&allow_ip) {
+                                error!("Invalid IPv4 address: {}", src.ip());
+                                continue;
+                            }
+                        } else {
+                            error!("Invalid ip address");
+                            continue;
+                        }
+                    }
+
                     let m_username = m_username.clone();
                     let m_password = m_password.clone();
                     let username = username.clone();
@@ -236,15 +254,6 @@ pub async fn main() -> Result<()> {
         (false, _) => "debug,backconnectsocks5=trace",
     };
     env_logger::init_from_env(Env::default().default_filter_or(logging));
-
-    let body = Body {
-        host: String::from("212.227.211.162"),
-        port: 56250,
-        m_port: 8005,
-        username: String::from(""),
-        password: String::from(""),
-        allow_ip: String::from(""),
-    };
 
     handle_request(body).await?;
 
