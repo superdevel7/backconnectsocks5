@@ -1,12 +1,9 @@
 use crate::errors::*;
 use bstr::ByteSlice;
-use rand::prelude::SliceRandom;
 use std::fmt;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-
 pub enum SocksAddr<'a> {
     Ipv4(&'a [u8]),
     Domain(&'a [u8]),
@@ -31,6 +28,8 @@ impl<'a> fmt::Display for SocksAddr<'a> {
 pub async fn recv_handshake<'a>(
     socket: &mut TcpStream,
     addr_buf: &'a mut [u8],
+    m_username: &String,
+    m_password: &String,
 ) -> Result<(SocksAddr<'a>, u16)> {
     let mut buf = [0u8; 2];
     socket
@@ -54,12 +53,74 @@ pub async fn recv_handshake<'a>(
         .await
         .context("Failed to read handshake")?;
 
-    // TODO: we're going to ignore the list and expect the client to support no-auth
+    let mut auth_flag = false;
+    for i in 0..n {
+        if buf[i] == 2 {
+            auth_flag = true;
+        }
+    }
 
-    socket
-        .write_all(&[0x05, 0x00])
-        .await
-        .context("Failed to send handshake")?;
+    if !m_username.is_empty() {
+        if !auth_flag {
+            bail!("Authentication method not supported");
+        }
+        socket
+            .write_all(&[0x05, 0x02])
+            .await
+            .context("Failed to send handshake - auth")?;
+
+        let mut buf = [0u8; 2];
+
+        socket
+            .read_exact(&mut buf)
+            .await
+            .context("Failed to read handshake - username length")?;
+
+        println!("version: {}", buf[0]);
+
+        let username_size = buf[1] as usize;
+
+        let mut buf = [0u8; 255];
+
+        socket
+            .read_exact(&mut buf[..username_size])
+            .await
+            .context("Failed to read handshake - username")?;
+
+        if String::from_utf8(buf[..username_size].to_vec())?.ne(m_username) {
+            bail!("Authentication failed");
+        }
+
+        let mut buf = [0u8; 1];
+
+        socket
+            .read_exact(&mut buf)
+            .await
+            .context("Failed to read handshake - password length")?;
+
+        let password_size = buf[0] as usize;
+
+        let mut buf = [0u8; 255];
+
+        socket
+            .read_exact(&mut buf[..password_size])
+            .await
+            .context("Failed to read handshake - password")?;
+
+        if String::from_utf8(buf[..password_size].to_vec())?.ne(m_password) {
+            bail!("Authentication failed");
+        }
+
+        socket
+            .write_all(&[0x01, 0x00])
+            .await
+            .context("Failed to send handshake")?;
+    } else {
+        socket
+            .write_all(&[0x05, 0x00])
+            .await
+            .context("Failed to send handshake")?;
+    }
 
     let mut buf = [0u8; 4];
     socket
@@ -118,28 +179,68 @@ pub async fn recv_handshake<'a>(
     Ok((addr, port))
 }
 
-async fn connect(proxy_addr: &SocketAddr, addr: &SocksAddr<'_>, port: u16) -> Result<TcpStream> {
+async fn connect(
+    proxy_addr: &SocketAddr,
+    addr: &SocksAddr<'_>,
+    port: u16,
+    username: &String,
+    password: &String,
+) -> Result<TcpStream> {
     debug!("Connecting to proxy server at {}", proxy_addr);
     let mut proxy = TcpStream::connect(proxy_addr)
         .await
         .context("Failed to connect to proxy server")?;
     debug!("Connected to {:?}", proxy_addr);
 
-    proxy
-        .write_all(&[5, 1, 0])
-        .await
-        .context("Failed to send handshake")?;
+    if username.is_empty() {
+        proxy
+            .write_all(&[5, 1, 0])
+            .await
+            .context("Failed to send handshake")?;
 
-    let mut buf = [0u8; 2];
-    proxy
-        .read_exact(&mut buf)
-        .await
-        .context("Failed to read handshake")?;
+        let mut buf = [0u8; 2];
+        proxy
+            .read_exact(&mut buf)
+            .await
+            .context("Failed to read handshake")?;
 
-    if buf != [5, 0] {
-        bail!("Proxy didn't accept anonymous auth");
+        if buf != [5, 0] {
+            bail!("Proxy didn't accept anonymous auth");
+        }
+    } else {
+        let mut buf = [0u8; 2];
+        proxy
+            .read_exact(&mut buf)
+            .await
+            .context("Failed to read handshake")?;
+
+        if buf != [5, 2] {
+            bail!("Proxy didn't accept auth");
+        }
+
+        let mut buf = vec![username.len() as u8];
+
+        buf.extend(username.as_bytes());
+
+        buf.extend(&[password.len() as u8]);
+
+        buf.extend(password.as_bytes());
+
+        proxy
+            .write_all(&buf)
+            .await
+            .context("Failed to send handshake")?;
+
+        let mut buf = [0u8; 2];
+        proxy
+            .read_exact(&mut buf)
+            .await
+            .context("Failed to read handshake")?;
+
+        if buf != [1, 0] {
+            bail!("Failed to handshake");
+        }
     }
-
     let mut buf = vec![5, 1, 0];
 
     match addr {
@@ -168,41 +269,22 @@ async fn connect(proxy_addr: &SocketAddr, addr: &SocksAddr<'_>, port: u16) -> Re
     Ok(proxy)
 }
 
-pub async fn serve(mut socket: TcpStream, proxies: Arc<Vec<SocketAddr>>) -> Result<()> {
+pub async fn serve_one(
+    mut socket: TcpStream,
+    m_username: String,
+    m_password: String,
+    proxy: SocketAddr,
+    username: String,
+    password: String,
+) -> Result<()> {
     let mut buf = [0u8; 255];
-    let (addr, port) = recv_handshake(&mut socket, &mut buf)
+    let (addr, port) = recv_handshake(&mut socket, &mut buf, &m_username, &m_password)
         .await
         .context("Failed to complete handshake with client")?;
 
     debug!("Received connection request for {}:{}", addr, port);
 
-    let proxy = proxies
-        .choose(&mut rand::thread_rng())
-        .context("No proxies configured")?;
-    debug!("Picked random proxy: {}", proxy);
-
-    let mut proxy = connect(proxy, &addr, port)
-        .await
-        .context("Failed to complete handshake with proxy")?;
-
-    tokio::io::copy_bidirectional(&mut socket, &mut proxy)
-        .await
-        .context("Failed to relay data")?;
-
-    debug!("Connection finished");
-
-    Ok(())
-}
-
-pub async fn serve_one(mut socket: TcpStream, proxy: SocketAddr) -> Result<()> {
-    let mut buf = [0u8; 255];
-    let (addr, port) = recv_handshake(&mut socket, &mut buf)
-        .await
-        .context("Failed to complete handshake with client")?;
-
-    debug!("Received connection request for {}:{}", addr, port);
-
-    let mut proxy = connect(&proxy, &addr, port)
+    let mut proxy = connect(&proxy, &addr, port, &username, &password)
         .await
         .context("Failed to complete handshake with proxy")?;
 
