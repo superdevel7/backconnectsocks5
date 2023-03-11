@@ -9,6 +9,7 @@ pub mod socks5;
 use crate::args::Args;
 use crate::errors::*;
 use anyhow::Result;
+use std::collections::HashMap;
 // use arc_swap::ArcSwap;
 /// Importing the `DateTime` type from the `chrono` crate.
 // use chrono::prelude::*;
@@ -19,23 +20,31 @@ use mysql::*;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::{Arc, Mutex};
 // use std::path::PathBuf;
-// use std::sync::Arc;
 use structopt::StructOpt;
 use tokio::net::TcpListener;
+// use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 // use tokio::signal::unix::{signal, SignalKind};
 use rand::{distributions::Alphanumeric, Rng};
+use tokio::signal;
 use warp::http::StatusCode;
 use warp::Filter;
 
 #[derive(Deserialize, Serialize)]
-pub struct Body {
+pub struct AddProxyBody {
     pub host: String,
     pub port: u16,
     pub username: String,
     pub password: String,
     pub m_port: u16,
     pub allow_ip: String,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct CancelProxyBody {
+    pub m_port: u16,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -46,6 +55,12 @@ pub struct ResponseData {
 #[derive(Deserialize, Serialize)]
 pub struct ErrMessage {
     pub message: String,
+}
+
+#[derive(Debug)]
+pub struct ProxyHandle {
+    cancel_token: CancellationToken,
+    // handle: JoinHandle<()>,
 }
 
 // lazy_static! {
@@ -64,6 +79,7 @@ pub async fn run_server(
     username: String,
     password: String,
     allow_ip: String,
+    proxies: Arc<Mutex<HashMap<u16, ProxyHandle>>>,
 ) -> Result<()> {
     let addr: String = format!("{}:{}", host, port).parse()?;
 
@@ -90,18 +106,16 @@ pub async fn run_server(
     let proxy: SocketAddr = addr.parse().unwrap();
 
     let bind: SocketAddr = format!("0.0.0.0:{}", m_port).parse().unwrap();
-    // a stream of sighup signals
-    // let mut sighup = signal(SignalKind::hangup())?;
-
-    // let proxies = list::load_from_path(&proxy_list)
-    //     .await
-    //     .context("Failed to load proxy list")?;
-    // let proxies = ArcSwap::from(Arc::new(proxies));
 
     info!("Binding listener to {}", bind);
     let listener = TcpListener::bind(bind).await?;
 
+    let cancel_token = CancellationToken::new();
+    let cancel_token_clone = cancel_token.clone();
+
+    // let handle =
     tokio::spawn(async move {
+        let cancel_token_clone = cancel_token.clone();
         loop {
             tokio::select! {
                 res = listener.accept() => {
@@ -141,65 +155,33 @@ pub async fn run_server(
                         }
                     });
                 }
-                // _ = sighup.recv() => {
-                //     debug!("Got signal HUP");
-                //     match list::load_from_path(&proxy_list).await {
-                //         Ok(list) => {
-                //             let list = Arc::new(list);
-                //             proxies.store(list);
-                //         }
-                //         Err(err) => {
-                //             error!("Failed to reload proxy list: {:#}", err);
-                //         }
-                //     }
-                // }
+                _ = signal::ctrl_c() => {
+                    break;
+                }
+                _ = cancel_token_clone.cancelled() => {
+                    break;
+                }
             }
         }
     });
 
+    let proxy_handle = ProxyHandle {
+        cancel_token: cancel_token_clone,
+        // handle,
+    };
+
+    let mut proxies = proxies.lock().unwrap();
+    if proxies.contains_key(&m_port) {
+        return Err(anyhow!("Port {} is already in use", m_port));
+    }
+    proxies.insert(m_port, proxy_handle);
+
     Ok(())
 }
 
-pub async fn handle_request(body: Body) -> Result<impl warp::Reply, Infallible> {
-    // host, port, m_port, username, password, allow_ip
-    debug!(
-        "Need to proxy to host: {}, port: {}, m_port: {}, username: {}, password: {}, allow_ip: {}",
-        body.host, body.port, body.m_port, body.username, body.password, body.allow_ip
-    );
-    // let list: Vec<(String, String)> = CONN
-    //     .lock()
-    //     .query(format!(
-    //         "select host, port from proxies where country='{}' and status=1 and period='{}'",
-    //         body.country, body.period
-    //     ))
-    //     .unwrap();
-
-    // if list.is_empty() {
-    //     // error!("Couldn't find proxy server for {} {} minutes", body.country, body.period);
-    //     let data = ErrMessage {
-    //         message: "No proxy server found".to_string(),
-    //     };
-    //     Ok(warp::reply::with_status(
-    //         warp::reply::json(&data),
-    //         StatusCode::BAD_REQUEST,
-    //     ))
-    // } else {
-    // let one = list.choose(&mut thread_rng()).unwrap();
-    // let p: u16;
-
-    // {
-    //     let mut rng = rand::thread_rng();
-    //     p = rng.gen_range(8010..8100);
-    // }
-
-    // // tokio::spawn(async move {
-    // //     // if let Err(err) = run_server(one.0.clone(), one.1.clone()).await {
-    // //     //     warn!("Error running server: {:#}", err);
-    // //     // }
-    // //     run_server(one.0.clone(), one.1.clone());
-    // // });
-
-    // // data.port = p;
+pub async fn handle_run_server(
+    (body, proxies): (AddProxyBody, Arc<Mutex<HashMap<u16, ProxyHandle>>>),
+) -> Result<impl warp::Reply, Infallible> {
     match run_server(
         body.host.clone(),
         body.port.clone(),
@@ -207,15 +189,11 @@ pub async fn handle_request(body: Body) -> Result<impl warp::Reply, Infallible> 
         body.username.clone(),
         body.password.clone(),
         body.allow_ip.clone(),
+        proxies,
     )
     .await
     {
         Ok(_) => {
-            //let success_200 = warp::any().map(warp::reply::json(&data));
-            // let reply = warp::reply::json(&data);
-            // let reply = Box::new(warp::reply::json(&data))
-            //     .map(|reply| warp::reply::with_status(reply, StatusCode::OK));
-            // Ok(warp::reply::with_status(reply, StatusCode::OK))
             let data = ResponseData { port: body.m_port };
             Ok(warp::reply::with_status(
                 warp::reply::json(&data),
@@ -235,10 +213,36 @@ pub async fn handle_request(body: Body) -> Result<impl warp::Reply, Infallible> 
             ))
         }
     }
-    // }
 }
 
-fn json_body() -> impl Filter<Extract = (Body,), Error = warp::Rejection> + Clone {
+pub async fn handle_stop_server(
+    (body, proxies): (CancelProxyBody, Arc<Mutex<HashMap<u16, ProxyHandle>>>),
+) -> Result<impl warp::Reply, Infallible> {
+    let port = body.m_port;
+    let mut proxies = proxies.lock().unwrap();
+    if let Some(handle) = proxies.remove(&port) {
+        handle.cancel_token.cancel();
+        let data = ResponseData { port: body.m_port };
+        Ok(warp::reply::with_status(
+            warp::reply::json(&data),
+            StatusCode::OK,
+        ))
+    } else {
+        let err_message = ErrMessage {
+            message: format!("No proxy server found on port {}", port),
+        };
+        Ok(warp::reply::with_status(
+            warp::reply::json(&err_message),
+            StatusCode::BAD_REQUEST,
+        ))
+    }
+}
+
+fn json_add_proxy_body() -> impl Filter<Extract = (AddProxyBody,), Error = warp::Rejection> + Clone {
+    warp::body::content_length_limit(1024 * 16).and(warp::body::json())
+}
+
+fn json_cancel_proxy_body() -> impl Filter<Extract = (CancelProxyBody,), Error = warp::Rejection> + Clone {
     warp::body::content_length_limit(1024 * 16).and(warp::body::json())
 }
 
@@ -253,17 +257,36 @@ pub async fn main() -> Result<()> {
         (false, 2) => "debug",
         (false, _) => "debug,backconnectsocks5=trace",
     };
+
     env_logger::init_from_env(Env::default().default_filter_or(logging));
 
-    handle_request(body).await?;
+    let proxies: Arc<Mutex<HashMap<u16, ProxyHandle>>> = Arc::new(Mutex::new(HashMap::new()));
+    let proxies_clone = proxies.clone();
 
-    let server = warp::post()
+    let api_run_server = warp::post()
         .and(warp::path!("api" / "proxy" / "buy"))
         .and(warp::path::end())
-        .and(json_body())
-        .and_then(handle_request);
+        .and(json_add_proxy_body())
+        .map(move |body: AddProxyBody| {
+            let proxies = proxies.clone();
+            (body, proxies)
+        })
+        .and_then(handle_run_server);
 
-    warp::serve(server).run(args.bind).await;
+    let api_stop_server = warp::post()
+        .and(warp::path!("api" / "proxy" / "stop"))
+        .and(warp::path::end())
+        .and(json_cancel_proxy_body())
+        .map(move |body: CancelProxyBody| {
+            let proxies = proxies_clone.clone();
+            (body, proxies)
+        })
+        .and_then(handle_stop_server);
+
+    let routes = api_run_server.or(api_stop_server);
+    // warp::serve(routes).bind_with_graceful_shutdown(args.bind);
+    // warp::serve(routes).bind(args.bind);
+    warp::serve(routes).run(args.bind).await;
 
     Ok(())
 }
