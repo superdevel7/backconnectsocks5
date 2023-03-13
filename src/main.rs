@@ -29,6 +29,7 @@ use tokio_util::sync::CancellationToken;
 // use tokio::signal::unix::{signal, SignalKind};
 use rand::{distributions::Alphanumeric, Rng};
 // use tokio::signal;
+use dotenv::dotenv;
 use std::env;
 use warp::http::StatusCode;
 use warp::Filter;
@@ -277,6 +278,8 @@ fn json_cancel_proxy_body(
 #[tokio::main]
 pub async fn main() -> Result<()> {
     let args = Args::from_args();
+
+    dotenv().ok();
 
     let logging = match (args.quiet, args.verbose) {
         (true, _) => "warn",
