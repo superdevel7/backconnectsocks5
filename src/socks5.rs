@@ -1,7 +1,9 @@
-use crate::errors::*;
+use anyhow::{bail, Context, Result};
 use bstr::ByteSlice;
+use log::debug;
 use std::fmt;
 use std::net::SocketAddr;
+use std::sync::{atomic::AtomicU64, Arc};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 pub enum SocksAddr<'a> {
@@ -28,8 +30,8 @@ impl<'a> fmt::Display for SocksAddr<'a> {
 pub async fn recv_handshake<'a>(
     socket: &mut TcpStream,
     addr_buf: &'a mut [u8],
-    m_username: &String,
-    m_password: &String,
+    m_credentials: &(String, String),
+    //m_password: &String,
 ) -> Result<(SocksAddr<'a>, u16)> {
     let mut buf = [0u8; 2];
     socket
@@ -60,7 +62,7 @@ pub async fn recv_handshake<'a>(
         }
     }
 
-    if !m_username.is_empty() {
+    if !m_credentials.0.is_empty() {
         if !auth_flag {
             bail!("Authentication method not supported");
         }
@@ -85,7 +87,7 @@ pub async fn recv_handshake<'a>(
             .await
             .context("Failed to read handshake - username")?;
 
-        if String::from_utf8(buf[..username_size].to_vec())?.ne(m_username) {
+        if String::from_utf8(buf[..username_size].to_vec())?.ne(&m_credentials.0) {
             bail!("Authentication failed");
         }
 
@@ -105,7 +107,7 @@ pub async fn recv_handshake<'a>(
             .await
             .context("Failed to read handshake - password")?;
 
-        if String::from_utf8(buf[..password_size].to_vec())?.ne(m_password) {
+        if String::from_utf8(buf[..password_size].to_vec())?.ne(&m_credentials.1) {
             bail!("Authentication failed");
         }
 
@@ -269,14 +271,14 @@ async fn connect(
 
 pub async fn serve_one(
     mut socket: TcpStream,
-    m_username: String,
-    m_password: String,
+    m_credentials: (String, String),
     proxy: SocketAddr,
     username: String,
     password: String,
+    delay: Arc<AtomicU64>,
 ) -> Result<(u64, u64)> {
     let mut buf = [0u8; 255];
-    let (addr, port) = recv_handshake(&mut socket, &mut buf, &m_username, &m_password)
+    let (addr, port) = recv_handshake(&mut socket, &mut buf, &m_credentials)
         .await
         .context("Failed to complete handshake with client")?;
 
@@ -286,16 +288,10 @@ pub async fn serve_one(
         .await
         .context("Failed to complete handshake with proxy")?;
 
-    let res = tokio::io::copy_bidirectional(&mut socket, &mut proxy)
-        .await
-        .context("Failed to relay data")?;
+    let (bytes_sent, bytes_received) =
+        crate::pipe::bidirectional_pipe(&mut socket, &mut proxy, delay)
+            .await
+            .context("Failed to relay data")?;
 
-    println!(
-        "Connection closed client to proxy: {} bytes, proxy to client {} bytes",
-        res.0, res.1
-    );
-
-    debug!("Connection finished");
-
-    Ok(res)
+    Ok((bytes_sent, bytes_received))
 }
