@@ -17,10 +17,15 @@ use env_logger::Env;
 /// Importing all the traits that are needed to use the mysql crate.
 /// Importing all the traits that are needed to use the mysql crate.
 use mysql::*;
+use reqwest;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 // use std::path::PathBuf;
 use structopt::StructOpt;
 use tokio::net::TcpListener;
@@ -96,6 +101,11 @@ pub async fn run_server(
 ) -> Result<(String, String)> {
     let addr: String = format!("{}:{}", host, port).parse()?;
 
+    // let mut data_in: u64 = 0;
+    // let mut data_out: u64 = 0;
+    let data_in = Arc::new(Mutex::new(0u64));
+    let data_out = Arc::new(Mutex::new(0u64));
+
     let mut m_username: String = "".to_string();
     let mut m_password: String = "".to_string();
 
@@ -166,9 +176,19 @@ pub async fn run_server(
                     let m_password = m_password.clone();
                     let username = username.clone();
                     let password = password.clone();
+                    let data_in_clone = Arc::clone(&data_in);
+                    let data_out_clone = Arc::clone(&data_out);
                     tokio::spawn(async move {
-                        if let Err(err) = socks5::serve_one(socket, m_username, m_password, proxy.clone(), username, password).await {
-                            warn!("Error serving client: {:#}", err);
+                        match socks5::serve_one(socket, m_username, m_password, proxy.clone(), username, password).await {
+                            Ok(res) => {
+                                let mut di = data_in_clone.lock().await;
+                                let mut do_ = data_out_clone.lock().await;
+                                *di += res.0;
+                                *do_ += res.1;
+                            }
+                            Err(err) => {
+                                warn!("Error serving client: {:#}", err);
+                            }
                         }
                     });
                 }
@@ -182,12 +202,70 @@ pub async fn run_server(
         }
     });
 
+    // periodically report to the server
+    let data_in_clone = Arc::clone(&data_in);
+    let data_out_clone = Arc::clone(&data_out);
+    tokio::spawn(async move {
+        // let cancel_token_clone = cancel_token.clone();
+        let interval = Duration::from_secs(11);
+        let mut last_run = Instant::now() - interval;
+        loop {
+            let mut di = data_in_clone.lock().await;
+            let mut do_ = data_out_clone.lock().await;
+
+            let di_v = *di;
+            let do_v = *do_;
+
+            if Instant::now() - last_run >= interval && (di_v > 0 || do_v > 0) {
+                // Create a new HTTP client
+                let client = reqwest::Client::new();
+
+                // Set the URL to send the POST request to
+                let url = "http://127.0.0.1:8000/api/report/socks5";
+
+                // Create a JSON object to send in the body of the POST request
+                let json_data = json!({
+                    "port": m_port,
+                    "data_in": di_v,
+                    "data_out": do_v,
+                });
+
+                *di = 0;
+                *do_ = 0;
+
+                // Send the POST request with the JSON data in the body
+                let response = client
+                    .post(url)
+                    .header(reqwest::header::CONTENT_TYPE, "application/json")
+                    .body(json_data.to_string())
+                    .send()
+                    .await
+                    .expect("failed to get response");
+                // let response = client
+                //     .get(url)
+                //     .send()
+                //     .await
+                //     .expect("failed to get response");
+
+                // Print the response status and body
+                println!("Response status: {}", response.status());
+                println!(
+                    "Response body:\n{}",
+                    response.text().await.expect("failed to get payload")
+                );
+
+                last_run = Instant::now();
+            }
+            thread::sleep(Duration::from_secs(1));
+        }
+    });
+
     let proxy_handle = ProxyHandle {
         cancel_token: cancel_token_clone,
         // handle,
     };
 
-    let mut proxies = proxies.lock().unwrap();
+    let mut proxies = proxies.lock().await;
     if proxies.contains_key(&m_port) {
         return Err(anyhow!("Port {} is already in use", m_port));
     }
@@ -242,7 +320,7 @@ pub async fn handle_stop_server(
     (body, proxies): (CancelProxyBody, Arc<Mutex<HashMap<u16, ProxyHandle>>>),
 ) -> Result<impl warp::Reply, Infallible> {
     let port = body.m_port;
-    let mut proxies = proxies.lock().unwrap();
+    let mut proxies = proxies.lock().await;
     if let Some(handle) = proxies.remove(&port) {
         handle.cancel_token.cancel();
         let data = StopResponseData {

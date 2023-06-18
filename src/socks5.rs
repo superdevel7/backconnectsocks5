@@ -274,7 +274,7 @@ pub async fn serve_one(
     proxy: SocketAddr,
     username: String,
     password: String,
-) -> Result<()> {
+) -> Result<(u64, u64)> {
     let mut buf = [0u8; 255];
     let (addr, port) = recv_handshake(&mut socket, &mut buf, &m_username, &m_password)
         .await
@@ -286,11 +286,16 @@ pub async fn serve_one(
         .await
         .context("Failed to complete handshake with proxy")?;
 
-    tokio::io::copy_bidirectional(&mut socket, &mut proxy)
+    let res = tokio::io::copy_bidirectional(&mut socket, &mut proxy)
         .await
         .context("Failed to relay data")?;
 
+    println!(
+        "Connection closed client to proxy: {} bytes, proxy to client {} bytes",
+        res.0, res.1
+    );
+
     debug!("Connection finished");
 
-    Ok(())
+    Ok(res)
 }
