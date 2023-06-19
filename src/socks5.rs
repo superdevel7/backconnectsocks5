@@ -271,22 +271,29 @@ async fn connect(
 
 pub async fn serve_one(
     mut socket: TcpStream,
-    m_credentials: (String, String),
-    proxy: SocketAddr,
-    username: String,
-    password: String,
+    proxy_info: crate::ProxyInfo,
+    // m_credentials: (String, String),
+    // proxy: SocketAddr,
+    // username: String,
+    // password: String,
     delay: Arc<AtomicU64>,
 ) -> Result<(u64, u64)> {
     let mut buf = [0u8; 255];
-    let (addr, port) = recv_handshake(&mut socket, &mut buf, &m_credentials)
+    let (addr, port) = recv_handshake(&mut socket, &mut buf, &proxy_info.m_credentials)
         .await
         .context("Failed to complete handshake with client")?;
 
     debug!("Received connection request for {}:{}", addr, port);
 
-    let mut proxy = connect(&proxy, &addr, port, &username, &password)
-        .await
-        .context("Failed to complete handshake with proxy")?;
+    let mut proxy = connect(
+        &proxy_info.proxy_addr,
+        &addr,
+        port,
+        &proxy_info.username,
+        &proxy_info.password,
+    )
+    .await
+    .context("Failed to complete handshake with proxy")?;
 
     let (bytes_sent, bytes_received) =
         crate::pipe::bidirectional_pipe(&mut socket, &mut proxy, delay)

@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use structopt::clap::AppSettings;
 use structopt::StructOpt;
 
-#[derive(StructOpt)]
+#[derive(StructOpt, Debug)]
 #[structopt(global_settings = &[AppSettings::ColoredHelp])]
 pub struct Args {
     /// Only show warnings
@@ -16,4 +16,7 @@ pub struct Args {
     /// The address to bind to
     #[structopt(short = "B", long, default_value = "127.0.0.1:1080")]
     pub bind: SocketAddr,
-} 
+    //the live_proxies file
+    #[structopt(short = "L", default_value = "./proxies.txt")]
+    pub proxies: String,
+}

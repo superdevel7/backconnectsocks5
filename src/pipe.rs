@@ -1,11 +1,11 @@
 //this is a code from tokio crate with copy_bidirectional fn modified and renamed to bidirectional_pipe
 
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
-use std::sync::{Arc, atomic::AtomicU64};
+use std::sync::{atomic::AtomicU64, Arc};
 use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 macro_rules! ready {
     ($e:expr $(,)?) => {
@@ -26,14 +26,14 @@ struct CopyBidirectional<'a, A: ?Sized, B: ?Sized> {
     a: &'a mut A,
     b: &'a mut B,
     a_to_b: TransferState,
-    b_to_a: TransferState
+    b_to_a: TransferState,
 }
 
 fn transfer_one_direction<A, B>(
     cx: &mut Context<'_>,
     state: &mut TransferState,
     r: &mut A,
-    w: &mut B
+    w: &mut B,
 ) -> Poll<io::Result<u64>>
 where
     A: AsyncRead + AsyncWrite + Unpin + ?Sized,
@@ -70,7 +70,7 @@ where
             a,
             b,
             a_to_b,
-            b_to_a
+            b_to_a,
         } = &mut *self;
 
         let a_to_b = transfer_one_direction(cx, a_to_b, &mut *a, &mut *b)?;
@@ -82,11 +82,15 @@ where
     }
 }
 
-pub async fn bidirectional_pipe<A, B>(a: &mut A, b: &mut B, delay: Arc<AtomicU64>) -> Result<(u64, u64), std::io::Error>
+pub async fn bidirectional_pipe<A, B>(
+    a: &mut A,
+    b: &mut B,
+    delay: Arc<AtomicU64>,
+) -> Result<(u64, u64), std::io::Error>
 where
     A: AsyncRead + AsyncWrite + Unpin + ?Sized,
-    B: AsyncRead + AsyncWrite + Unpin + ?Sized 
-    {
+    B: AsyncRead + AsyncWrite + Unpin + ?Sized,
+{
     CopyBidirectional {
         a,
         b,
@@ -104,7 +108,7 @@ pub(super) struct CopyBuffer {
     cap: usize,
     amt: u64,
     buf: Box<[u8]>,
-    delay: Arc<AtomicU64>
+    delay: Arc<AtomicU64>,
 }
 
 impl CopyBuffer {
@@ -116,7 +120,7 @@ impl CopyBuffer {
             cap: 0,
             amt: 0,
             buf: vec![0; 8192].into_boxed_slice(),
-            delay
+            delay,
         }
     }
 
@@ -172,7 +176,7 @@ impl CopyBuffer {
     where
         R: AsyncRead + ?Sized,
         W: AsyncWrite + ?Sized,
-    {   
+    {
         loop {
             if self.pos == self.cap && !self.read_done {
                 self.pos = 0;
@@ -223,10 +227,14 @@ impl CopyBuffer {
 struct Copy<'a, R: ?Sized, W: ?Sized> {
     reader: &'a mut R,
     writer: &'a mut W,
-    buf: CopyBuffer
+    buf: CopyBuffer,
 }
 
-pub async fn copy<'a, R, W>(reader: &'a mut R, writer: &'a mut W, delay: Arc<AtomicU64>) -> io::Result<u64>
+pub async fn copy<'a, R, W>(
+    reader: &'a mut R,
+    writer: &'a mut W,
+    delay: Arc<AtomicU64>,
+) -> io::Result<u64>
 where
     R: AsyncRead + Unpin + ?Sized,
     W: AsyncWrite + Unpin + ?Sized,
@@ -234,8 +242,9 @@ where
     Copy {
         reader,
         writer,
-        buf: CopyBuffer::new(delay)
-    }.await
+        buf: CopyBuffer::new(delay),
+    }
+    .await
 }
 
 impl<R, W> Future for Copy<'_, R, W>

@@ -1,6 +1,7 @@
-use crate::{AdminProxyBody, ProxyHandle, ThreadMessage, Traffic};
+use crate::{AdminProxyBody, ProxyData, ProxyHandle, ThreadMessage, Traffic};
 use anyhow::{anyhow, ensure, Result};
 use log::{debug, error, info, warn};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -8,13 +9,13 @@ use std::sync::{
 };
 use tokio::{
     sync::{
-        mpsc::{error::TryRecvError, UnboundedReceiver},
+        mpsc::{error::TryRecvError, UnboundedReceiver, UnboundedSender},
         RwLock,
     },
     task::{self, JoinHandle},
 };
 
-#[derive(serde::Deserialize, serde::Serialize)]
+#[derive(Deserialize, Serialize)]
 struct AdminData {
     m_port: u16,
     delay: u64,
@@ -77,9 +78,56 @@ pub async fn handle_admin_endpoint(
     }
 }
 
+//load the live_proxies hashmap from file
+async fn live_proxies_load(path: &str) -> Result<HashMap<u16, ProxyData>> {
+    use tokio::io::AsyncReadExt;
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents).await?;
+    Ok(serde_json::from_str(&contents)?)
+}
+//save the live_proxies hashmap to file
+async fn live_proxies_save(proxies: &HashMap<u16, ProxyData>, path: &str) -> tokio::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let json = serde_json::to_string(proxies)?;
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .create(true)
+        .open(path)
+        .await?;
+    file.write_all(json.as_bytes()).await
+}
+// get the live_proxies hashmap from file on start
+async fn proxies_restore(
+    proxies: Arc<RwLock<HashMap<u16, ProxyHandle>>>,
+    tx: UnboundedSender<ThreadMessage>,
+    path: &str,
+) -> HashMap<u16, ProxyData> {
+    if let Ok(live_proxies) = live_proxies_load(path).await {
+        for (m_port, proxy_data) in &live_proxies {
+            let proxy_data = ProxyData {
+                info: proxy_data.info.clone(),
+                traffic: proxy_data.traffic.clone(),
+            };
+            if let Err(err) =
+                crate::run_server(*m_port, proxy_data, Vec::new(), proxies.clone(), tx.clone())
+                    .await
+            {
+                error!("Cannot restart proxy on {m_port}. Error: {err}");
+            }
+        }
+        live_proxies
+    } else {
+        HashMap::new()
+    }
+}
+
 //this thread will stay alive as long as the server is running and monitor the proxies traffic
 pub async fn start_admin_thread(
     mut rx: UnboundedReceiver<ThreadMessage>,
+    tx: UnboundedSender<ThreadMessage>,
+    proxies_path: String,
     proxies: Arc<RwLock<HashMap<u16, ProxyHandle>>>,
     thread_counter: Arc<AtomicUsize>,
 ) -> Result<()> {
@@ -87,12 +135,32 @@ pub async fn start_admin_thread(
         debug!("Admin thread started");
         let mut messages: Vec<(u16, JoinHandle<Option<(u64, u64)>>)> = Vec::new();
         let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(1));
+        let mut live_proxies: HashMap<u16, ProxyData> =
+            proxies_restore(proxies.clone(), tx, &proxies_path).await;
+        let mut start = tokio::time::Instant::now();
+        let one_day = std::time::Duration::from_secs(3600 * 24);
         loop {
             match rx.try_recv() {
-                Ok(ThreadMessage::StartProxy(m_port, delay)) => {
+                Ok(ThreadMessage::StartProxy(m_port, delay, proxy_info)) => {
                     let mut proxies_traffic = proxies.write().await;
                     if let Some(proxy_handle) = proxies_traffic.get_mut(&m_port) {
                         proxy_handle.delay = delay;
+                    }
+                    live_proxies.insert(
+                        m_port,
+                        ProxyData {
+                            info: proxy_info,
+                            traffic: Traffic::default(),
+                        },
+                    );
+                    if let Err(err) = live_proxies_save(&live_proxies, &proxies_path).await {
+                        error!("Failed to save the live_proxies for port {m_port}. Error: {err}");
+                    }
+                }
+                Ok(ThreadMessage::StopProxy(m_port)) => {
+                    live_proxies.remove(&m_port);
+                    if let Err(err) = live_proxies_save(&live_proxies, &proxies_path).await {
+                        error!("Failed to remove proxy {m_port} from live_proxies. Error: {err}");
                     }
                 }
                 Ok(ThreadMessage::NewServeOne(m_port, join_handle)) => {
@@ -111,9 +179,20 @@ pub async fn start_admin_thread(
                         let (bytes_sent, bytes_received) = bytes.unwrap_or((0, 0));
                         if let Some(proxy_handle) = proxies_traffic.get_mut(&message.0) {
                             proxy_handle.traffic += Traffic(bytes_sent, bytes_received);
+                            live_proxies
+                                .entry(message.0)
+                                .and_modify(|proxy| proxy.traffic = proxy_handle.traffic);
                         }
                     }
                     Err(err) => warn!("Finished thread with error: {:?}", err),
+                }
+            }
+            // update the proxies file daily
+            let now = tokio::time::Instant::now();
+            if now > start + one_day {
+                start = now;
+                if let Err(err) = live_proxies_save(&live_proxies, &proxies_path).await {
+                    error!("Failed the daily update for live_proxies. Error: {err}");
                 }
             }
             let count = thread_counter.load(Ordering::SeqCst);

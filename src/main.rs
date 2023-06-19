@@ -78,7 +78,7 @@ pub struct ErrMessage {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct Traffic(u64, u64);
 
 impl Add for Traffic {
@@ -103,21 +103,27 @@ pub struct ProxyHandle {
 
 #[derive(Debug)]
 pub enum ThreadMessage {
-    StartProxy(u16, Arc<AtomicU64>),
+    StartProxy(u16, Arc<AtomicU64>, ProxyInfo),
+    StopProxy(u16),
     NewServeOne(u16, JoinHandle<Option<(u64, u64)>>),
 }
 
-pub async fn run_server(
-    host: String,
-    port: u16,
-    m_port: u16,
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ProxyData {
+    pub info: crate::ProxyInfo,
+    pub traffic: crate::Traffic,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProxyInfo {
+    proxy_addr: SocketAddr,
     username: String,
     password: String,
-    allow_ip: Vec<String>,
-    proxies: Arc<RwLock<HashMap<u16, ProxyHandle>>>,
-    tx: UnboundedSender<ThreadMessage>,
-) -> Result<(String, String)> {
-    let m_credentials = if allow_ip.is_empty() {
+    m_credentials: (String, String),
+}
+
+fn get_credentials(allow_ip: &Vec<String>) -> (String, String) {
+    if allow_ip.is_empty() {
         (
             rand::thread_rng()
                 .sample_iter(&Alphanumeric)
@@ -132,41 +138,26 @@ pub async fn run_server(
         )
     } else {
         (String::new(), String::new())
-    };
+    }
+}
 
-    let m_credentials_clone = m_credentials.clone();
-
-    let proxy_addr: SocketAddr = format!("{}:{}", host, port).parse()?;
-
-    let bind: SocketAddr = format!("0.0.0.0:{}", m_port).parse()?;
-
-    let cancel_token = CancellationToken::new();
-    let cancel_token_clone = cancel_token.clone();
-    let proxy_handle = ProxyHandle {
-        cancel_token,
-        traffic: Traffic(0, 0),
-        delay: Arc::new(0.into()),
-    };
-    info!("Binding listener to {}", bind);
-    let listener = TcpListener::bind(bind).await?;
-    let mut proxies_hashmap = proxies.write().await;
-    proxies_hashmap
-        .entry(m_port)
-        .and_modify(|handle| {
-            handle.cancel_token.cancel();
-            handle.cancel_token = proxy_handle.cancel_token.clone();
-            handle.traffic = Traffic(0, 0);
-            handle.delay = Arc::new(0.into());
-        })
-        .or_insert(proxy_handle);
-    // anyhow::ensure!(!proxies_hashmap.contains_key(&m_port), "Port {} is already in use", m_port );
-    // proxies_hashmap.insert(m_port, proxy_handle);
-
+async fn run_proxy(
+    m_port: u16,
+    proxy_info: ProxyInfo,
+    tx: UnboundedSender<ThreadMessage>,
+    listener: TcpListener,
+    cancel_token: CancellationToken,
+    allow_ip: Vec<String>,
+) {
     tokio::spawn(async move {
         // create an AtomicU64 which will control the transfer speed for this proxy.
         // send the Arc<AtomicU64> to the admin_thread so it can be stored in the proxies hashmap and controled in real time by admin
         let atomic_delay = Arc::new(AtomicU64::new(0));
-        match tx.send(ThreadMessage::StartProxy(m_port, atomic_delay.clone())) {
+        match tx.send(ThreadMessage::StartProxy(
+            m_port,
+            atomic_delay.clone(),
+            proxy_info.clone(),
+        )) {
             Ok(_) => debug!(
                 "start proxy on port {} message sent to admin_thread",
                 m_port
@@ -201,13 +192,12 @@ pub async fn run_server(
                             continue;
                         }
                     }
+
                     let delay = atomic_delay.clone();
-                    let m_credentials = m_credentials_clone.clone();
-                    let username = username.clone();
-                    let password = password.clone();
+                    let proxy_info_clone = proxy_info.clone();
                     let s1_handle = tokio::spawn(async move {
                         debug!("start serve_one thread");
-                        match socks5::serve_one(socket, m_credentials, proxy_addr, username, password, delay).await {
+                        match socks5::serve_one(socket, proxy_info_clone, delay).await {
                             Ok(traffic) => {
                                 info!("end serve_one thread with traffic: {:?}", traffic);
                                 Some(traffic)
@@ -224,12 +214,61 @@ pub async fn run_server(
                         Err(err) => error!("Error on sending join_handle {:?}", err)
                     }
                 }
-                _ = cancel_token_clone.cancelled() => break
+                _ = cancel_token.cancelled() => {
+                        match tx.send(ThreadMessage::StopProxy(m_port)) {
+                            Ok(_) => debug!("start proxy on port {} message sent to admin_thread", m_port),
+                            Err(err) => error!("Error on sending stop proxy message {:?}", err)
+                        };
+                        break
+                }
             }
         }
     });
+}
 
-    Ok(m_credentials)
+pub async fn run_server(
+    m_port: u16,
+    proxy_data: ProxyData,
+    allow_ip: Vec<String>,
+    proxies: Arc<RwLock<HashMap<u16, ProxyHandle>>>,
+    tx: UnboundedSender<ThreadMessage>,
+) -> Result<(String, String)> {
+    let proxy_info = proxy_data.info;
+    let proxy_credentials = proxy_info.m_credentials.clone();
+
+    let bind: SocketAddr = format!("0.0.0.0:{}", m_port).parse()?;
+
+    let cancel_token = CancellationToken::new();
+    let cancel_token_clone = cancel_token.clone();
+    let proxy_handle = ProxyHandle {
+        cancel_token,
+        traffic: Traffic(0, 0),
+        delay: Arc::new(0.into()),
+    };
+    info!("Binding listener to {}", bind);
+    let listener = TcpListener::bind(bind).await?;
+    let mut proxies_hashmap = proxies.write().await;
+    proxies_hashmap
+        .entry(m_port)
+        .and_modify(|handle| {
+            handle.cancel_token.cancel();
+            handle.cancel_token = proxy_handle.cancel_token.clone();
+            handle.traffic = Traffic(0, 0);
+            handle.delay = Arc::new(0.into());
+        })
+        .or_insert(proxy_handle);
+
+    run_proxy(
+        m_port,
+        proxy_info,
+        tx,
+        listener,
+        cancel_token_clone,
+        allow_ip,
+    )
+    .await;
+
+    Ok(proxy_credentials)
 }
 
 pub async fn handle_run_server(
@@ -239,43 +278,53 @@ pub async fn handle_run_server(
         UnboundedSender<ThreadMessage>,
     ),
 ) -> Result<impl warp::Reply, Infallible> {
-    match run_server(
-        body.host.clone(),
-        body.port.clone(),
-        body.m_port.clone(),
-        body.username.clone(),
-        body.password.clone(),
-        body.allow_ip.clone(),
-        proxies,
-        tx,
-    )
-    .await
-    {
-        Ok((m_username, m_password)) => {
-            let data = BuyResponseData {
-                protocol: String::from("socks5"),
-                host: env::var("SERVER_PUBLIC_IP").unwrap_or_else(|_| "127.0.0.1".to_string()),
-                port: body.m_port,
-                m_username,
-                m_password,
-            };
-            Ok(warp::reply::with_status(
-                warp::reply::json(&data),
-                StatusCode::OK,
-            ))
-            // Ok(reply);
-        } // success
-        Err(err) => {
-            // fail
-            error!("Failed to run server: {:#}", err);
-            let data = ErrMessage {
-                message: "Failed to run server".to_string(),
-            };
-            Ok(warp::reply::with_status(
-                warp::reply::json(&data),
-                StatusCode::BAD_REQUEST,
-            ))
+    if let Ok(proxy_addr) = format!("{}:{}", body.host, body.port).parse() {
+        let proxy_info = ProxyInfo {
+            proxy_addr,
+            username: body.username,
+            password: body.password,
+            m_credentials: get_credentials(&body.allow_ip),
+        };
+        let proxy_data = ProxyData {
+            info: proxy_info,
+            traffic: Traffic::default(),
+        };
+        match run_server(body.m_port, proxy_data, body.allow_ip, proxies, tx).await {
+            Ok((m_username, m_password)) => {
+                let data = BuyResponseData {
+                    protocol: String::from("socks5"),
+                    host: env::var("SERVER_PUBLIC_IP").unwrap_or_else(|_| "127.0.0.1".to_string()),
+                    port: body.m_port,
+                    m_username,
+                    m_password,
+                };
+                Ok(warp::reply::with_status(
+                    warp::reply::json(&data),
+                    StatusCode::OK,
+                ))
+                // Ok(reply);
+            } // success
+            Err(err) => {
+                // fail
+                error!("Failed to run server: {:#}", err);
+                let data = ErrMessage {
+                    message: "Failed to run server".to_string(),
+                };
+                Ok(warp::reply::with_status(
+                    warp::reply::json(&data),
+                    StatusCode::BAD_REQUEST,
+                ))
+            }
         }
+    } else {
+        error!("Failed to run server: host:port syntax error");
+        let data = ErrMessage {
+            message: "Failed to run server".to_string(),
+        };
+        Ok(warp::reply::with_status(
+            warp::reply::json(&data),
+            StatusCode::BAD_REQUEST,
+        ))
     }
 }
 
@@ -336,6 +385,7 @@ pub async fn main() -> Result<()> {
     };
 
     env_logger::init_from_env(Env::default().default_filter_or(logging));
+    log::info!("Args: {:?}", args);
 
     let proxies: Arc<RwLock<HashMap<u16, ProxyHandle>>> = Arc::new(RwLock::new(HashMap::new()));
     let proxies_clone_stop = proxies.clone();
@@ -343,7 +393,14 @@ pub async fn main() -> Result<()> {
     let thread_counter = Arc::new(AtomicUsize::new(0));
     let (tx, rx) = unbounded_channel::<ThreadMessage>();
 
-    start_admin_thread(rx, proxies.clone(), thread_counter.clone()).await?;
+    start_admin_thread(
+        rx,
+        tx.clone(),
+        args.proxies,
+        proxies.clone(),
+        thread_counter.clone(),
+    )
+    .await?;
 
     let api_run_admin = warp::post()
         .and(warp::path!("api" / "admin"))
