@@ -94,6 +94,20 @@ impl AddAssign for Traffic {
     }
 }
 
+impl From<(String, String)> for Traffic {
+    fn from((bs, br): (String, String)) -> Self {
+        if let Ok(b_sent) = bs.parse() {
+            if let Ok(b_rcvd) = br.parse() {
+                Self(b_sent, b_rcvd)
+            } else {
+                Self::default()
+            }
+        } else {
+            Self::default()
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ProxyHandle {
     cancel_token: CancellationToken,
@@ -399,6 +413,7 @@ pub async fn main() -> Result<()> {
         args.proxies,
         proxies.clone(),
         thread_counter.clone(),
+        args.url,
     )
     .await?;
 
