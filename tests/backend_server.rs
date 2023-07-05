@@ -1,26 +1,26 @@
+use actix_web::{get, App, HttpResponse, HttpServer, Responder};
+use serde::{Deserialize, Serialize};
 use tokio::test;
-use actix_web::{get, App, HttpServer, Responder, HttpResponse};
-use serde::{Serialize, Deserialize};
 
-#[cfg_attr(test, derive(Debug,Default,PartialEq))]
-#[derive(Serialize,Deserialize)]
+#[cfg_attr(test, derive(Debug, Default, PartialEq))]
+#[derive(Serialize, Deserialize)]
 enum Protocol {
-    #[cfg_attr(test,default)] 
-    Socks5,
-    Http
+    #[cfg_attr(test, default)]
+    socks5,
+    http,
 }
 
 impl std::string::ToString for Protocol {
     fn to_string(&self) -> String {
         match self {
-            Protocol::Socks5 => String::from("socks5"),
-            Protocol::Http => String::from("http"),
+            Protocol::socks5 => String::from("socks5"),
+            Protocol::http => String::from("http"),
         }
     }
 }
 
-#[cfg_attr(test, derive(Debug,Default,PartialEq))]
-#[derive(Serialize,Deserialize)]
+#[cfg_attr(test, derive(Debug, Default, PartialEq))]
+#[derive(Serialize, Deserialize)]
 pub struct Proxy {
     protocol: Protocol,
     pub host: String,
@@ -30,11 +30,11 @@ pub struct Proxy {
     pub url: String,
     #[serde(rename = "isDeleted")]
     is_deleted: bool,
-    id: String
+    id: String,
 }
 
-#[cfg_attr(test, derive(Debug,Default,PartialEq))]
-#[derive(Serialize,Deserialize)]
+#[cfg_attr(test, derive(Debug, Default, PartialEq))]
+#[derive(Serialize, Deserialize)]
 pub struct ClientData {
     pub user: String,
     pub proxy: Proxy,
@@ -51,7 +51,7 @@ pub struct ClientData {
     pub m_url: String,
     #[serde(rename = "isDeleted")]
     is_deleted: bool,
-    id: String
+    id: String,
 }
 
 #[get("/")]
@@ -65,22 +65,24 @@ async fn run() -> impl Responder {
     let backend_data = vec![client_data];
     println!("backend_data: {:?}", backend_data);
     let json_data = serde_json::to_string(&backend_data).unwrap();
-    HttpResponse::Ok().content_type("application/json").body(json_data)
+    HttpResponse::Ok()
+        .content_type("application/json")
+        .body(json_data)
 }
-
 
 async fn backend() -> std::io::Result<()> {
     HttpServer::new(|| App::new().service(run))
-            .bind("localhost:8000").unwrap()
-            .run()
-            .await
+        .bind("localhost:8000")
+        .unwrap()
+        .run()
+        .await
 }
 
 #[test]
 async fn test_backend() {
     let timeout = std::time::Duration::from_secs(10);
     //the backend should run forever so Err is our Ok case
-    if let Err(_) =  tokio::time::timeout(timeout, backend()).await {
+    if let Err(_) = tokio::time::timeout(timeout, backend()).await {
         assert!(true);
     } else {
         assert!(false);
