@@ -269,7 +269,7 @@ async fn connect(
     Ok(proxy)
 }
 
-pub async fn serve_one(
+pub async fn serve_socks5(
     mut socket: TcpStream,
     proxy_info: crate::ProxyInfo,
     // m_credentials: (String, String),

@@ -302,6 +302,7 @@ dependencies = [
  "actix-web",
  "anyhow",
  "arc-swap",
+ "base64 0.21.2",
  "bstr",
  "bytes",
  "chrono",

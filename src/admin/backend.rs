@@ -1,23 +1,6 @@
-use crate::{ProxyData, ProxyInfo, Traffic};
+use crate::{Protocol, ProxyData, ProxyInfo, Traffic};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-
-#[cfg_attr(test, derive(Debug, Default, PartialEq))]
-#[derive(Serialize, Deserialize)]
-enum Protocol {
-    #[cfg_attr(test, default)]
-    socks5,
-    http,
-}
-
-impl std::string::ToString for Protocol {
-    fn to_string(&self) -> String {
-        match self {
-            Protocol::socks5 => String::from("socks5"),
-            Protocol::http => String::from("http"),
-        }
-    }
-}
 
 #[cfg_attr(test, derive(Debug, Default, PartialEq))]
 #[derive(Serialize, Deserialize)]
@@ -71,6 +54,7 @@ impl From<BackendData> for ProxyHashMap {
         for data in backend_data.data {
             if let Ok(proxy_addr) = format!("{}:{}", data.proxy.host, data.proxy.port).parse() {
                 let proxy_info = ProxyInfo {
+                    protocol: data.protocol,
                     proxy_addr,
                     username: data.proxy.username,
                     password: data.proxy.password,

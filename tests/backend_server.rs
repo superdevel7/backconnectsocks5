@@ -6,15 +6,15 @@ use tokio::test;
 #[derive(Serialize, Deserialize)]
 enum Protocol {
     #[cfg_attr(test, default)]
-    socks5,
-    http,
+    Socks5,
+    Http,
 }
 
 impl std::string::ToString for Protocol {
     fn to_string(&self) -> String {
         match self {
-            Protocol::socks5 => String::from("socks5"),
-            Protocol::http => String::from("http"),
+            Protocol::Socks5 => String::from("socks5"),
+            Protocol::Http => String::from("http"),
         }
     }
 }
