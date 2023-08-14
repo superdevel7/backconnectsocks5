@@ -1,1 +1,1 @@
-{}
+{"8031":{"info":{"protocol":"HTTP","proxy_addr":"87.106.127.114:18269","username":"x4HZ","password":"ckEL","m_credentials":["L7EvAgo","jiJLbRgBkTAjQ6j"]},"traffic":[1197846,10988887]}}
