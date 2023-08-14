@@ -1,11 +1,11 @@
 //this is a code from tokio crate with copy_bidirectional fn modified and renamed to bidirectional_pipe
 
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
-use std::sync::{Arc, atomic::AtomicU64};
+use std::sync::{atomic::AtomicU64, Arc};
 use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 macro_rules! ready {
     ($e:expr $(,)?) => {
@@ -26,14 +26,14 @@ struct CopyBidirectional<'a, A: ?Sized, B: ?Sized> {
     a: &'a mut A,
     b: &'a mut B,
     a_to_b: TransferState,
-    b_to_a: TransferState
+    b_to_a: TransferState,
 }
 
 fn transfer_one_direction<A, B>(
     cx: &mut Context<'_>,
     state: &mut TransferState,
     r: &mut A,
-    w: &mut B
+    w: &mut B,
 ) -> Poll<io::Result<u64>>
 where
     A: AsyncRead + AsyncWrite + Unpin + ?Sized,
@@ -70,7 +70,7 @@ where
             a,
             b,
             a_to_b,
-            b_to_a
+            b_to_a,
         } = &mut *self;
 
         let a_to_b = transfer_one_direction(cx, a_to_b, &mut *a, &mut *b)?;
@@ -82,11 +82,16 @@ where
     }
 }
 
-pub async fn bidirectional_pipe<A, B>(a: &mut A, b: &mut B, delay: Arc<AtomicU64>, auth: Option<Vec<u8>>) -> Result<(u64, u64), std::io::Error>
+pub async fn bidirectional_pipe<A, B>(
+    a: &mut A,
+    b: &mut B,
+    delay: Arc<AtomicU64>,
+    auth: Option<(String, Vec<u8>)>,
+) -> Result<(u64, u64), std::io::Error>
 where
     A: AsyncRead + AsyncWrite + Unpin + ?Sized,
-    B: AsyncRead + AsyncWrite + Unpin + ?Sized 
-    {
+    B: AsyncRead + AsyncWrite + Unpin + ?Sized,
+{
     CopyBidirectional {
         a,
         b,
@@ -105,11 +110,11 @@ pub(super) struct CopyBuffer {
     amt: u64,
     buf: Box<[u8]>,
     delay: Arc<AtomicU64>,
-    auth: Option<Vec<u8>>
+    auth: Option<(String, Vec<u8>)>,
 }
 
 impl CopyBuffer {
-    fn new(delay: Arc<AtomicU64>, auth: Option<Vec<u8>>) -> Self {
+    fn new(delay: Arc<AtomicU64>, auth: Option<(String, Vec<u8>)>) -> Self {
         Self {
             read_done: false,
             need_flush: false,
@@ -118,7 +123,7 @@ impl CopyBuffer {
             amt: 0,
             buf: vec![0; 8192].into_boxed_slice(),
             delay,
-            auth
+            auth,
         }
     }
 
@@ -129,7 +134,7 @@ impl CopyBuffer {
     ) -> Poll<io::Result<()>>
     where
         R: AsyncRead + ?Sized,
-    {   
+    {
         let proxy_auth = self.auth.clone();
         let me = &mut *self;
         let mut buf = ReadBuf::new(&mut me.buf);
@@ -142,15 +147,14 @@ impl CopyBuffer {
             me.cap = filled_len;
             if let Some(auth) = proxy_auth {
                 let request = String::from_utf8_lossy(buf.filled());
-                log::info!("Request with size: {} {:?}", request.len(), request);
-                if let Some((header, _body)) = request.split_once("\r\n\r\n") {
-                    let filled_auth_len = filled_len + auth.len();
+                log::info!("Request: {:?}", request);
+                if let Some((first, _)) = request.split_once(&auth.0) {
+                    let filled_auth_len = filled_len + auth.1.len() - auth.0.len();
                     let mut vec = Vec::from(buf.filled());
-                    vec.splice(header.len()..header.len(), auth);
+                    vec.splice(first.len()..first.len() + auth.0.len(), auth.1);
                     me.cap = filled_auth_len;
                     me.buf = vec.into_boxed_slice();
-                    log::info!("Header {:?}", String::from_utf8_lossy(&me.buf))
-            
+                    log::info!("Modified Request {:?}", String::from_utf8_lossy(&me.buf))
                 }
             }
         }
@@ -188,7 +192,7 @@ impl CopyBuffer {
     where
         R: AsyncRead + ?Sized,
         W: AsyncWrite + ?Sized,
-    {   
+    {
         loop {
             if self.pos == self.cap && !self.read_done {
                 self.pos = 0;
@@ -232,7 +236,6 @@ impl CopyBuffer {
             }
         }
     }
-
 }
 
 #[derive(Debug)]
@@ -240,10 +243,15 @@ impl CopyBuffer {
 struct Copy<'a, R: ?Sized, W: ?Sized> {
     reader: &'a mut R,
     writer: &'a mut W,
-    buf: CopyBuffer
+    buf: CopyBuffer,
 }
 
-pub async fn copy<'a, R, W>(reader: &'a mut R, writer: &'a mut W, delay: Arc<AtomicU64>, auth: Option<Vec<u8>>) -> io::Result<u64>
+pub async fn copy<'a, R, W>(
+    reader: &'a mut R,
+    writer: &'a mut W,
+    delay: Arc<AtomicU64>,
+    auth: Option<(String, Vec<u8>)>,
+) -> io::Result<u64>
 where
     R: AsyncRead + Unpin + ?Sized,
     W: AsyncWrite + Unpin + ?Sized,
@@ -251,8 +259,9 @@ where
     Copy {
         reader,
         writer,
-        buf: CopyBuffer::new(delay, auth)
-    }.await
+        buf: CopyBuffer::new(delay, auth),
+    }
+    .await
 }
 
 impl<R, W> Future for Copy<'_, R, W>

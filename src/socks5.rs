@@ -1,9 +1,9 @@
-use log::debug;
-use anyhow::{Result, Context, bail};
+use anyhow::{bail, Context, Result};
 use bstr::ByteSlice;
+use log::debug;
 use std::fmt;
 use std::net::SocketAddr;
-use std::sync::{Arc, atomic::AtomicU64};
+use std::sync::{atomic::AtomicU64, Arc};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 pub enum SocksAddr<'a> {
@@ -33,7 +33,6 @@ pub async fn recv_handshake<'a>(
     m_credentials: &(String, String),
     //m_password: &String,
 ) -> Result<(SocksAddr<'a>, u16)> {
-
     let mut buf = [0u8; 2];
     socket
         .read_exact(&mut buf)
@@ -187,7 +186,6 @@ async fn connect(
     username: &String,
     password: &String,
 ) -> Result<TcpStream> {
-
     debug!("Connecting to proxy server at {}", proxy_addr);
     let mut proxy = TcpStream::connect(proxy_addr)
         .await
@@ -287,13 +285,20 @@ pub async fn serve_socks5(
 
     debug!("Received connection request for {}:{}", addr, port);
 
-    let mut proxy = connect(&proxy_info.proxy_addr, &addr, port, &proxy_info.username, &proxy_info.password)
-        .await
-        .context("Failed to complete handshake with proxy")?;
-    
-    let (bytes_sent, bytes_received) = crate::pipe::bidirectional_pipe(&mut socket, &mut proxy, delay, None)
-        .await
-        .context("Failed to relay data")?;
+    let mut proxy = connect(
+        &proxy_info.proxy_addr,
+        &addr,
+        port,
+        &proxy_info.username,
+        &proxy_info.password,
+    )
+    .await
+    .context("Failed to complete handshake with proxy")?;
+
+    let (bytes_sent, bytes_received) =
+        crate::pipe::bidirectional_pipe(&mut socket, &mut proxy, delay, None)
+            .await
+            .context("Failed to relay data")?;
 
     Ok((bytes_sent, bytes_received))
-} 
+}
